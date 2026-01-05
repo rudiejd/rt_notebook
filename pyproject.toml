@@ -1,0 +1,15 @@
+[project]
+name = "prediction_notebook"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=1.4.3",
+    "leafmap>=0.57.10",
+    "mapclassify>=2.10.0",
+    "marimo>=0.18.4",
+    "polars[pyarrow]>=1.36.1",
+    "sqlglot>=28.5.0",
+    "ty>=0.0.9",
+]
