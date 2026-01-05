@@ -58,15 +58,35 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    date_ui = mo.ui.datetime()
-    route_id_ui = mo.ui.dropdown(['Mattapan', 'Green-B', 'Green-C', 'Green-D', 'Green-E'], label="Route", value="Mattapan")
-
     from datetime import datetime, timezone, timedelta
-    return date_ui, datetime, route_id_ui, timedelta
+    yesterday = datetime.now() - timedelta(days=1)
+    date_ui = mo.ui.date(label="Service Date", value=yesterday.date())
+    range = mo.ui.date_range()
+    route_id_ui = mo.ui.dropdown(['', 'Mattapan', 'Green-B', 'Green-C', 'Green-D', 'Green-E'], label="Route", value="Mattapan")
+    vehicle_id_ui = mo.ui.text(label="Vehicle ID (blank for any)", value="")
+
+
+    return date_ui, datetime, route_id_ui, timedelta, vehicle_id_ui
 
 
 @app.cell
-def _(date_ui, datetime, mo, route_id_ui, timedelta):
+def _(date_ui, datetime, mo):
+    start_time_ui = mo.ui.datetime(label="Start Time", value=datetime(day=date_ui.value.day, month=date_ui.value.month, year=date_ui.value.year))
+    end_time_ui = mo.ui.datetime(label="End Time", value=datetime(day=date_ui.value.day, month=date_ui.value.month, year=date_ui.value.year))
+    return end_time_ui, start_time_ui
+
+
+@app.cell
+def _(
+    date_ui,
+    datetime,
+    end_time_ui,
+    mo,
+    route_id_ui,
+    start_time_ui,
+    timedelta,
+    vehicle_id_ui,
+):
     tu_df = mo.sql(
         f"""
         SELECT
@@ -75,9 +95,12 @@ def _(date_ui, datetime, mo, route_id_ui, timedelta):
         FROM
               lamp.read_ymd("DEV_GREEN_RT_TRIP_UPDATES", DATE('{datetime.strftime(date_ui.value, "%Y-%m-%d")}'), DATE('{datetime.strftime(date_ui.value + timedelta(days=1), "%Y-%m-%d")}')) tu
         WHERE
-            tu."trip_update.trip.route_id" = '{route_id_ui.value}'
-            AND HOUR(est_time) = {date_ui.value.hour}
-            AND MINUTE(est_time) = {date_ui.value.minute}
+               (LENGTH('{vehicle_id_ui.value}') == 0 OR tu."trip_update.vehicle.id" = '{vehicle_id_ui.value}')
+                AND (LENGTH('{route_id_ui.value}') == 0 OR tu."trip_update.trip.route_id" = '{route_id_ui.value}')
+                AND HOUR(est_time) >= {start_time_ui.value.hour}
+                AND HOUR(est_time) <= {end_time_ui.value.hour}
+                AND MINUTE(est_time) >= {start_time_ui.value.minute}
+                AND MINUTE(est_time) <= {end_time_ui.value.minute}
         ORDER BY est_time
         """
     )
@@ -91,8 +114,16 @@ def _(tu_df):
 
 
 @app.cell
-def _(date_ui, datetime, duckdb, route_id_ui, timedelta):
-
+def _(
+    date_ui,
+    datetime,
+    duckdb,
+    end_time_ui,
+    route_id_ui,
+    start_time_ui,
+    timedelta,
+    vehicle_id_ui,
+):
     vp_df = duckdb.sql(
         f"""
         SELECT
@@ -101,13 +132,11 @@ def _(date_ui, datetime, duckdb, route_id_ui, timedelta):
         FROM
         lamp.read_ymd("DEV_GREEN_RT_VEHICLE_POSITIONS", DATE('{datetime.strftime(date_ui.value, "%Y-%m-%d")}'), DATE('{datetime.strftime(date_ui.value + timedelta(days=1), "%Y-%m-%d")}')) vp
         WHERE
-            vp.day = {date_ui.value.day}
-            AND vp.month = {date_ui.value.month}
-            AND vp.year = {date_ui.value.year}
-            AND vp."vehicle.trip.route_id" = '{route_id_ui.value}'
-            AND HOUR(est_time) = {date_ui.value.hour}
-            AND MINUTE(est_time) = {date_ui.value.minute}
-        ORDER BY est_time
+            (LENGTH('{vehicle_id_ui.value}') == 0 OR vp."vehicle.vehicle.id" = '{vehicle_id_ui.value}')
+            AND (LENGTH('{route_id_ui.value}') == 0 OR vp."vehicle.trip.route_id" = '{route_id_ui.value}')
+            AND AGE(est_time, '{start_time_ui.value}') >= '0 minutes'
+            AND AGE(est_time, '{end_time_ui.value}') < '0 minutes'
+         ORDER BY est_time
         """
     ).df()
     #vp_df = vp_df.merge(tu_df, how='left', left_on=['vehicle.vehicle.id', "vehicle.stop_id", 'feed_timestamp'], right_on=["trip_update.vehicle.id", "trip_update.stop_time_update.stop_id", "feed_timestamp"])
@@ -115,12 +144,21 @@ def _(date_ui, datetime, duckdb, route_id_ui, timedelta):
 
 
 @app.cell
-def _(date_ui, mo, route_id_ui, tu_df, vp_df):
+def _(
+    date_ui,
+    end_time_ui,
+    mo,
+    route_id_ui,
+    start_time_ui,
+    tu_df,
+    vehicle_id_ui,
+    vp_df,
+):
     import leafmap
     import geopandas as gpd
     import pandas as pd
 
-    plot_df = pd.DataFrame({'vehicle_id': vp_df['vehicle.vehicle.id'], 'direction_id': vp_df["vehicle.trip.direction_id"], 'trip': vp_df['vehicle.trip.trip_id'], 'next_stop_id': vp_df['vehicle.stop_id'], 'time': vp_df['est_time'] })
+    plot_df = pd.DataFrame({'vehicle_id': vp_df['vehicle.vehicle.id'], 'direction_id': vp_df["vehicle.trip.direction_id"], 'trip': vp_df['vehicle.trip.trip_id'], 'next_stop_id': vp_df['vehicle.stop_id'], 'time': vp_df['est_time'], 'consist': vp_df["vehicle.vehicle.label"] })
 
     plot_df = plot_df.astype({'time': 'str'})
 
@@ -130,8 +168,26 @@ def _(date_ui, mo, route_id_ui, tu_df, vp_df):
     m = leafmap.Map(center=(42.361145, -71.057083), zoom=12, height="400px")
     m.add_tile_layer(url="https://cdn.mbta.com/osm_tiles/{z}/{x}/{y}.png", name="MassDOT", attribution="MassDOT")
     if gdf.size != 0:    
-        m.add_gdf(gdf, layer_name="vps")
-    mo.vstack([route_id_ui, date_ui, m, tu_df])
+        m.add_gdf(gdf, layer_name="vps", )
+    mo.vstack([vehicle_id_ui, route_id_ui, date_ui, start_time_ui, end_time_ui, m, tu_df])
+    return
+
+
+@app.cell
+def _(vp_df):
+    vp_df
+    return
+
+
+@app.cell
+def _(mo, vp_df):
+    _df = mo.sql(
+        f"""
+        SELECT MIN(est_time), vp_df."vehicle.trip.trip_id" trip_id, vp_df."vehicle.vehicle.id" vehicle_id FROM vp_df
+        WHERE vp_df."vehicle.trip.schedule_relationship" != 'ADDED'
+        GROUP BY trip_id, vehicle_id
+        """
+    )
     return
 
 
