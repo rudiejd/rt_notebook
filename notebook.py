@@ -7,7 +7,8 @@ app = marimo.App(width="medium")
 @app.cell
 def _():
     import marimo as mo
-    return (mo,)
+    import duckdb
+    return duckdb, mo
 
 
 @app.cell
@@ -58,9 +59,10 @@ def _(mo):
 @app.cell
 def _(mo):
     date_ui = mo.ui.datetime()
+    route_id_ui = mo.ui.dropdown(['Mattapan', 'Green-B', 'Green-C', 'Green-D', 'Green-E'], label="Route", value="Mattapan")
 
     from datetime import datetime, timezone, timedelta
-    return date_ui, datetime, timedelta
+    return date_ui, datetime, route_id_ui, timedelta
 
 
 @app.cell
@@ -83,8 +85,15 @@ def _(date_ui, datetime, mo, route_id_ui, timedelta):
 
 
 @app.cell
-def _(date_ui, datetime, mo, route_id_ui, timedelta):
-    vp_df = mo.sql(
+def _(tu_df):
+    tu_df
+    return
+
+
+@app.cell
+def _(date_ui, datetime, duckdb, route_id_ui, timedelta):
+
+    vp_df = duckdb.sql(
         f"""
         SELECT
             *,
@@ -100,21 +109,9 @@ def _(date_ui, datetime, mo, route_id_ui, timedelta):
             AND MINUTE(est_time) = {date_ui.value.minute}
         ORDER BY est_time
         """
-    )
+    ).df()
+    #vp_df = vp_df.merge(tu_df, how='left', left_on=['vehicle.vehicle.id', "vehicle.stop_id", 'feed_timestamp'], right_on=["trip_update.vehicle.id", "trip_update.stop_time_update.stop_id", "feed_timestamp"])
     return (vp_df,)
-
-
-@app.cell
-def _(mo):
-    route_id_ui = mo.ui.dropdown(options=["Mattapan", "Green-B", "Green-C", "Green-D", "Green-E"], value="Mattapan", label="Route")
-    route_id_ui
-    return (route_id_ui,)
-
-
-@app.cell
-def _(date_ui):
-    date_ui
-    return
 
 
 @app.cell
@@ -122,8 +119,6 @@ def _(date_ui, mo, route_id_ui, tu_df, vp_df):
     import leafmap
     import geopandas as gpd
     import pandas as pd
-
-    label_col = "id="+ vp_df['vehicle.vehicle.id'] + "\n time=" + vp_df['est_time'] + "\n trip=" + vp_df['vehicle.trip.trip_id'] + "\n next_stop_id= " + vp_df['vehicle.stop_id'] + " direction=" + vp_df["vehicle.trip.direction_id"]
 
     plot_df = pd.DataFrame({'vehicle_id': vp_df['vehicle.vehicle.id'], 'direction_id': vp_df["vehicle.trip.direction_id"], 'trip': vp_df['vehicle.trip.trip_id'], 'next_stop_id': vp_df['vehicle.stop_id'], 'time': vp_df['est_time'] })
 
@@ -134,7 +129,8 @@ def _(date_ui, mo, route_id_ui, tu_df, vp_df):
 
     m = leafmap.Map(center=(42.361145, -71.057083), zoom=12, height="400px")
     m.add_tile_layer(url="https://cdn.mbta.com/osm_tiles/{z}/{x}/{y}.png", name="MassDOT", attribution="MassDOT")
-    m.add_gdf(gdf, layer_name="vps")
+    if gdf.size != 0:    
+        m.add_gdf(gdf, layer_name="vps")
     mo.vstack([route_id_ui, date_ui, m, tu_df])
     return
 
