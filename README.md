@@ -19,4 +19,4 @@ For accessing LAMP, you will need AWS credentials set up locally.
 If you just want to run the map, click "run all cells" on the hamburger menu at the top.
 
 
-[Demo video](demo.mov)
+[Demo video](demo.mp4)
