@@ -57,14 +57,29 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _(status_code):
+    import requests
+
+    routes_response = requests.get("https://api-v3.mbta.com/routes")
+    if routes_response.status_code != 200:
+        raise f"Received HTTP {status_code} from V3 API when fetching routes"
+    json = routes_response.json()
+    routes = []
+    for route in json["data"]:
+        routes.append(route["id"])
+    routes
+    return (routes,)
+
+
+@app.cell
+def _(mo, routes):
     from datetime import datetime, timezone, timedelta
     yesterday = datetime.now() - timedelta(days=1)
     date_ui = mo.ui.date(label="Service Date", value=yesterday.date())
     range = mo.ui.date_range()
-    route_id_ui = mo.ui.dropdown(['', 'Mattapan', 'Green-B', 'Green-C', 'Green-D', 'Green-E', 'Red', 'Orange', 'Blue', '1', '28', 'CR-NewBedford', 'CR-Fairmount'], label="Route", value="Mattapan")
+    route_id_ui = mo.ui.dropdown([''] + routes, label="Route", value="Mattapan")
     vehicle_id_ui = mo.ui.text(label="Vehicle ID (blank for any)", value="")
-    environment_ui = mo.ui.dropdown(['prod', 'dev-green'], label="LAMP Environment (bus is only on prod)", value="prod")
+    environment_ui = mo.ui.dropdown(['prod', 'dev-green'], label="LAMP Environment (bus / CR are prod only)", value="prod")
 
     environment_info = {"prod": {"trip_updates": "RT_TRIP_UPDATES", "vehicle_positions": "RT_VEHICLE_POSITIONS"}, "dev-green": {"trip_updates": "DEV_GREEN_RT_TRIP_UPDATES", "vehicle_positions": "RT_VEHICLE_POSITIONS"}}
     return (
