@@ -62,9 +62,8 @@ def _(mo):
     yesterday = datetime.now() - timedelta(days=1)
     date_ui = mo.ui.date(label="Service Date", value=yesterday.date())
     range = mo.ui.date_range()
-    route_id_ui = mo.ui.dropdown(['', 'Mattapan', 'Green-B', 'Green-C', 'Green-D', 'Green-E'], label="Route", value="Mattapan")
+    route_id_ui = mo.ui.dropdown(['', 'Mattapan', 'Green-B', 'Green-C', 'Green-D', 'Green-E', 'Red', 'Orange', 'Blue', '1', '28'], label="Route", value="Mattapan")
     vehicle_id_ui = mo.ui.text(label="Vehicle ID (blank for any)", value="")
-
 
     return date_ui, datetime, route_id_ui, timedelta, vehicle_id_ui
 
@@ -101,16 +100,10 @@ def _(
                 AND HOUR(est_time) <= {end_time_ui.value.hour}
                 AND MINUTE(est_time) >= {start_time_ui.value.minute}
                 AND MINUTE(est_time) <= {end_time_ui.value.minute}
-        ORDER BY est_time
+        ORDER BY est_time, "trip_update.trip.trip_id", tu."trip_update.stop_time_update.stop_sequence"
         """
     )
     return (tu_df,)
-
-
-@app.cell
-def _(tu_df):
-    tu_df
-    return
 
 
 @app.cell
@@ -128,18 +121,19 @@ def _(
         f"""
         SELECT
             *,
-            TO_HUMAN_TIME(feed_timestamp) AS est_time
+            TO_HUMAN_TIME(feed_timestamp) AS est_time,
+            'est_time - {end_time_ui.value}' < '0 minutes' AS age
         FROM
         lamp.read_ymd("DEV_GREEN_RT_VEHICLE_POSITIONS", DATE('{datetime.strftime(date_ui.value, "%Y-%m-%d")}'), DATE('{datetime.strftime(date_ui.value + timedelta(days=1), "%Y-%m-%d")}')) vp
         WHERE
             (LENGTH('{vehicle_id_ui.value}') == 0 OR vp."vehicle.vehicle.id" = '{vehicle_id_ui.value}')
             AND (LENGTH('{route_id_ui.value}') == 0 OR vp."vehicle.trip.route_id" = '{route_id_ui.value}')
-            AND AGE(est_time, '{start_time_ui.value}') >= '0 minutes'
-            AND AGE(est_time, '{end_time_ui.value}') < '0 minutes'
+            AND est_time BETWEEN '{start_time_ui.value}' AND '{end_time_ui.value}'
          ORDER BY est_time
         """
     ).df()
     #vp_df = vp_df.merge(tu_df, how='left', left_on=['vehicle.vehicle.id', "vehicle.stop_id", 'feed_timestamp'], right_on=["trip_update.vehicle.id", "trip_update.stop_time_update.stop_id", "feed_timestamp"])
+    vp_df
     return (vp_df,)
 
 
@@ -170,24 +164,6 @@ def _(
     if gdf.size != 0:    
         m.add_gdf(gdf, layer_name="vps", )
     mo.vstack([vehicle_id_ui, route_id_ui, date_ui, start_time_ui, end_time_ui, m, tu_df])
-    return
-
-
-@app.cell
-def _(vp_df):
-    vp_df
-    return
-
-
-@app.cell
-def _(mo, vp_df):
-    _df = mo.sql(
-        f"""
-        SELECT MIN(est_time), vp_df."vehicle.trip.trip_id" trip_id, vp_df."vehicle.vehicle.id" vehicle_id FROM vp_df
-        WHERE vp_df."vehicle.trip.schedule_relationship" != 'ADDED'
-        GROUP BY trip_id, vehicle_id
-        """
-    )
     return
 
 
