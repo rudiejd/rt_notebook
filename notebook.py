@@ -62,10 +62,20 @@ def _(mo):
     yesterday = datetime.now() - timedelta(days=1)
     date_ui = mo.ui.date(label="Service Date", value=yesterday.date())
     range = mo.ui.date_range()
-    route_id_ui = mo.ui.dropdown(['', 'Mattapan', 'Green-B', 'Green-C', 'Green-D', 'Green-E', 'Red', 'Orange', 'Blue', '1', '28'], label="Route", value="Mattapan")
+    route_id_ui = mo.ui.dropdown(['', 'Mattapan', 'Green-B', 'Green-C', 'Green-D', 'Green-E', 'Red', 'Orange', 'Blue', '1', '28', 'CR-NewBedford', 'CR-Fairmount'], label="Route", value="Mattapan")
     vehicle_id_ui = mo.ui.text(label="Vehicle ID (blank for any)", value="")
+    environment_ui = mo.ui.dropdown(['prod', 'dev-green'], label="LAMP Environment (bus is only on prod)", value="prod")
 
-    return date_ui, datetime, route_id_ui, timedelta, vehicle_id_ui
+    environment_info = {"prod": {"trip_updates": "RT_TRIP_UPDATES", "vehicle_positions": "RT_VEHICLE_POSITIONS"}, "dev-green": {"trip_updates": "DEV_GREEN_RT_TRIP_UPDATES", "vehicle_positions": "RT_VEHICLE_POSITIONS"}}
+    return (
+        date_ui,
+        datetime,
+        environment_info,
+        environment_ui,
+        route_id_ui,
+        timedelta,
+        vehicle_id_ui,
+    )
 
 
 @app.cell
@@ -80,6 +90,8 @@ def _(
     date_ui,
     datetime,
     end_time_ui,
+    environment_info,
+    environment_ui,
     mo,
     route_id_ui,
     start_time_ui,
@@ -92,7 +104,7 @@ def _(
             *,
             TO_HUMAN_TIME(feed_timestamp) as est_time
         FROM
-              lamp.read_ymd("DEV_GREEN_RT_TRIP_UPDATES", DATE('{datetime.strftime(date_ui.value, "%Y-%m-%d")}'), DATE('{datetime.strftime(date_ui.value + timedelta(days=1), "%Y-%m-%d")}')) tu
+              lamp.read_ymd("{environment_info[environment_ui.value]['trip_updates']}", DATE('{datetime.strftime(date_ui.value, "%Y-%m-%d")}'), DATE('{datetime.strftime(date_ui.value + timedelta(days=1), "%Y-%m-%d")}')) tu
         WHERE
                (LENGTH('{vehicle_id_ui.value}') == 0 OR tu."trip_update.vehicle.id" = '{vehicle_id_ui.value}')
                 AND (LENGTH('{route_id_ui.value}') == 0 OR tu."trip_update.trip.route_id" = '{route_id_ui.value}')
@@ -112,6 +124,8 @@ def _(
     datetime,
     duckdb,
     end_time_ui,
+    environment_info,
+    environment_ui,
     route_id_ui,
     start_time_ui,
     timedelta,
@@ -124,7 +138,7 @@ def _(
             TO_HUMAN_TIME(feed_timestamp) AS est_time,
             'est_time - {end_time_ui.value}' < '0 minutes' AS age
         FROM
-        lamp.read_ymd("DEV_GREEN_RT_VEHICLE_POSITIONS", DATE('{datetime.strftime(date_ui.value, "%Y-%m-%d")}'), DATE('{datetime.strftime(date_ui.value + timedelta(days=1), "%Y-%m-%d")}')) vp
+        lamp.read_ymd("{environment_info[environment_ui.value]['vehicle_positions']}", DATE('{datetime.strftime(date_ui.value, "%Y-%m-%d")}'), DATE('{datetime.strftime(date_ui.value + timedelta(days=1), "%Y-%m-%d")}')) vp
         WHERE
             (LENGTH('{vehicle_id_ui.value}') == 0 OR vp."vehicle.vehicle.id" = '{vehicle_id_ui.value}')
             AND (LENGTH('{route_id_ui.value}') == 0 OR vp."vehicle.trip.route_id" = '{route_id_ui.value}')
@@ -141,6 +155,7 @@ def _(
 def _(
     date_ui,
     end_time_ui,
+    environment_ui,
     mo,
     route_id_ui,
     start_time_ui,
@@ -163,7 +178,7 @@ def _(
     m.add_tile_layer(url="https://cdn.mbta.com/osm_tiles/{z}/{x}/{y}.png", name="MassDOT", attribution="MassDOT")
     if gdf.size != 0:    
         m.add_gdf(gdf, layer_name="vps", )
-    mo.vstack([vehicle_id_ui, route_id_ui, date_ui, start_time_ui, end_time_ui, m, tu_df])
+    mo.vstack([environment_ui, vehicle_id_ui, route_id_ui, date_ui, start_time_ui, end_time_ui, m, tu_df])
     return
 
 
