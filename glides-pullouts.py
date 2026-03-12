@@ -68,6 +68,30 @@ def _(mo):
 def _(mo):
     _df = mo.sql(
         f"""
+        CREATE TABLE trips AS
+        SELECT
+            *
+        FROM
+            read_csv(
+                '~/git/gtfs_creator/output/developer/trips.txt',
+                sample_size = -1
+            )
+        WHERE
+            route_id = 'Green-B';
+
+        CREATE TABLE stop_times AS
+        SELECT * FROM
+        read_csv('~/git/gtfs_creator/output/developer/stop_times.txt', sample_size=-1) st
+        JOIN trips t ON st.trip_id = t.trip_id;
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo, stop_times):
+    _df = mo.sql(
+        f"""
         CREATE OR REPLACE TABLE pullout_trips (trip_id VARCHAR, service_type VARCHAR);
 
         -- LOL NEVERMIND, let's just do it manually
@@ -86,6 +110,11 @@ def _(mo):
             ('73220419', 'Weekday'),
             ('73220426', 'Weekday'),
             ('73220482', 'Weekday');
+
+        CREATE OR REPLACE TABLE pullout_trips AS
+        SELECT pt.trip_id, MIN(departure_time) bc_departure FROM pullout_trips pt
+        JOIN stop_times st ON st.trip_id = pt.trip_id
+        GROUP BY pt.trip_id;
         """
     )
     return
@@ -98,7 +127,9 @@ def _(mo, pullout_trips):
         CREATE TABLE pullout_trips_with_date AS
         SELECT
             GENERATE_SERIES AS service_date,
-            trip_id
+            trip_id,
+            strptime(bc_departure, '%H:%M:%S') dep_time,
+            MAKE_TIMESTAMP(YEAR(service_date), MONTH(service_date), DAY(service_date), HOUR(dep_time), MINUTE(dep_time), SECOND(dep_time)) departure
         FROM
             GENERATE_SERIES(
                 TIMESTAMP '2026-02-26',
@@ -121,44 +152,17 @@ def _(mo, pullout_trips):
 
 
 @app.cell
-def _(mo, pullout_trips):
+def _(mo):
     _df = mo.sql(
         f"""
-        CREATE OR REPLACE TABLE bc_departures AS (
-            SELECT
-                "vehicle.vehicle.id" vehicle_id,
-                "vehicle.trip.trip_id" trip_id,
-                TO_HUMAN_TIME (MIN(feed_timestamp)) AS departure,
-                year,
-                month,
-                day
-            FROM
-                lamp.read_ymd (
-                    'DEV_GREEN_RT_VEHICLE_POSITIONS',
-                    DATE('2026-02-26'),
-                    DATE('2026-03-05')
-                )
-            INNER JOIN pullout_trips pt ON pt.trip_id = "vehicle.trip.trip_id"
-            WHERE
-                -- boston college park st platform - we only care about arrival and departure here
-                "vehicle.stop_id" != '70106'
-            GROUP BY
-                "vehicle.trip.trip_id",
-                vehicle_id,
-                year,
-                month,
-                day
-        );
-        """
-    )
-    return
-
-
-@app.cell
-def _(bc_departures, mo):
-    _df = mo.sql(
-        f"""
-        SELECT * FROM bc_departures LIMIT 5;
+        CREATE TABLE trip_updates AS
+        SELECT * FROM lamp.read_ymd (
+            'DEV_GREEN_RT_TRIP_UPDATES',
+            DATE('2026-02-26'),
+            DATE('2026-03-06')
+        ) tu
+        -- only boston college or south st inbound predictions
+        WHERE tu."trip_update.stop_time_update.stop_id" = '70106' AND tu."trip_update.trip.direction_id" = '1'
         """
     )
     return
@@ -168,75 +172,198 @@ def _(bc_departures, mo):
 def _(mo):
     _df = mo.sql(
         f"""
-        CREATE TABLE trip_updates AS
+        CREATE TABLE vehicle_positions AS
         SELECT * FROM lamp.read_ymd (
-            'DEV_GREEN_RT_TRIP_UPDATES',
+            'DEV_GREEN_RT_VEHICLE_POSITIONS',
             DATE('2026-02-26'),
-            DATE('2026-03-05')
-        ) tu ON pt.trip_id = tu."trip_update.trip.trip_id"
+            DATE('2026-03-06')
+        ) vp
+        WHERE vp."vehicle.stop_id" IN ('70106');
         """
     )
     return
 
 
 @app.cell
-def _(bc_departures, mo, pullout_trips_with_date):
+def _(mo):
     _df = mo.sql(
         f"""
-        SET disabled_optimizers = 'join_order,build_side_probe_side';
+        CREATE TABLE vehicle_first_departure AS
         SELECT
-            pt.trip_id,
+            vp."vehicle.vehicle.id" vehicle_id,
+            day,
+            month,
+            TO_HUMAN_TIME (MIN(vp.feed_timestamp)) first_departure
+        FROM
+            lamp.read_ymd (
+                'DEV_GREEN_RT_VEHICLE_POSITIONS',
+                DATE('2026-02-26'),
+                DATE('2026-03-06')
+            ) vp
+        WHERE
+            vp."vehicle.stop_id" = '70110'
+            AND "vehicle.trip.direction_id" = 1
+            AND HOUR(TO_HUMAN_TIME (vp.feed_timestamp)) >= 4 
+            AND HOUR(TO_HUMAN_TIME(vp.feed_timestamp)) <= 8
+        GROUP BY
+            vehicle_id,
+            day,
+        	month
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo, vehicle_first_departure):
+    _df = mo.sql(
+        f"""
+        SELECT * FROM vehicle_first_departure
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo, pullout_trips_with_date, trip_updates, vehicle_first_departure):
+    _df = mo.sql(
+        f"""
+        CREATE TABLE first_prediction_by_day AS
+        SELECT
+            trip_id,
             service_date,
-            tu."trip_update.trip.trip_id" tu_trip_id,
-            strptime(
-                "trip_update.trip.start_date" || ' ' || "trip_update.trip.start_time",
-                '%Y%m%d %I:%M:%S'
-            ) scheduled_time,
-            -- time of first prediction FOR THE TRIP
-            MIN(TO_HUMAN_TIME (tu.feed_timestamp)) first_prediction,
-            -- time of first vehicle ping FOR THE VEHICLE ON THE PULLOUT TRIP
-            MIN(TO_HUMAN_TIME (vp.feed_timestamp)) first_vehicle_position,
-            concat(tu.year, '-', tu.month, '-', tu.day) date,
-            -- departure = time that the pullout trip, or another
-            first_prediction < departure,
-            -- vehicle existed 5 minutes before departure from BC
-            first_vehicle_position + INTERVAL 5 minutes < departure vehicle_existed,
-            departure
+            tu."trip_update.trip.start_time" start_time,
+            tu."trip_update.vehicle.id" vehicle_id,
+            -- First Boston College terminal prediction
+            TO_HUMAN_TIME (MIN(tu.feed_timestamp)) first_prediction,
+            first_departure,
+            first_prediction IS NOT NULL
+            and first_departure IS NOT NULL
+            AND first_prediction + INTERVAL 5 MINUTES < first_departure AS predicted,
+
         FROM
             pullout_trips_with_date pt
+            LEFT JOIN trip_updates tu ON tu."trip_update.trip.trip_id" = pt.trip_id
+            JOIN vehicle_first_departure dp ON dp.vehicle_id = tu."trip_update.vehicle.id"
+        WHERE
+            DAY(service_date) = tu.day
+            AND MONTH(service_date) = tu.month
+            AND YEAR(service_date) = tu.year
+            AND DAY(service_date) = dp.day
+            AND MONTH(service_date) = dp.month
+        GROUP BY
+            trip_id,
+            service_date,
+            first_departure,
+            tu."trip_update.vehicle.id",
+            start_time;
+
+        SELECT
+            *
+        FROM
+            first_prediction_by_day;
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo, pullout_trips_with_date):
+    _df = mo.sql(
+        f"""
+        -- trips that didn't get a prediction before departure from boston college. What's the vehicle and consist they eventually got when that trip did get predictions?
+        CREATE TABLE vehicles_for_unpredicted_trips AS SELECT
+            trip_id,
+            departure,
+            service_date,
+            MIN_BY(tu."trip_update.vehicle.id", tu.feed_timestamp) vehicle_id,
+            MIN_BY(tu."trip_update.vehicle.label", tu.feed_timestamp) consist,
+            TO_HUMAN_TIME(MIN(tu.feed_timestamp)) first_prediction
+        FROM
+            pullout_trips_with_date
             LEFT JOIN lamp.read_ymd (
                 'DEV_GREEN_RT_TRIP_UPDATES',
                 DATE('2026-02-26'),
                 DATE('2026-03-05')
-            ) tu ON pt.trip_id = tu."trip_update.trip.trip_id"
-            LEFT JOIN lamp.read_ymd (
+            ) tu ON trip_id = tu."trip_update.trip.trip_id"
+        WHERE
+            DAY(service_date) = tu.day
+            OR tu.day IS NULL
+            AND MONTH(service_date) = tu.month
+            OR tu.day IS NULL
+            AND YEAR(service_date) = tu.year
+            OR tu.day IS NULL
+        GROUP BY
+            trip_id, service_date, departure
+        ORDER BY service_date;
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo, vehicles_for_unpredicted_trips):
+    _df = mo.sql(
+        f"""
+        -- for the vehicles that ended up making the pullout trip, WHEN did they first exist (regardless of what trip they were assigned to)
+        SELECT
+            trip_id,
+            vehicle_id,
+            service_date,
+            TO_HUMAN_TIME (MIN(vp.feed_timestamp)) AS creation_time,
+            departure,
+            -- the consist when the vehicle spawned in   
+            MIN_BY(vp."vehicle.vehicle.label", vp.feed_timestamp) AS first_consist,
+            -- the consist when we actually started predicting the trip
+            consist AS correct_consist,
+            first_consist == correct_consist had_correct_consist,
+            creation_time < departure AS vehicle_existed,
+            creation_time + INTERVAL 5 MINUTES < departure AS vehicle_existed_5min
+        FROM
+            vehicles_for_unpredicted_trips
+            INNER JOIN lamp.read_ymd (
                 'DEV_GREEN_RT_VEHICLE_POSITIONS',
                 DATE('2026-02-26'),
                 DATE('2026-03-05')
-            ) vp ON vp."vehicle.vehicle.id" = tu."trip_update.vehicle.id"
-                AND vp.year = tu.year
-                AND vp.month = tu.month
-                AND vp.day = tu.day
-            LEFT JOIN bc_departures dp ON dp.trip_id = pt.trip_id
-            	AND dp.year = tu.year
-                AND dp.month = tu.month
-                AND dp.day = tu.day
+            ) vp ON vp."vehicle.vehicle.id" = vehicle_id
         WHERE
-            -- Boston College
-            vp."vehicle.stop_id" = '70106' AND
-            tu."trip_update.stop_time_update.stop_id" = '70106'
+            DAY(service_date) = DAY(TO_HUMAN_TIME (vp.feed_timestamp))
+            AND MONTH(service_date) = MONTH(TO_HUMAN_TIME (vp.feed_timestamp))
+            AND YEAR(service_date) = YEAR(TO_HUMAN_TIME (vp.feed_timestamp))
+            AND vp."vehicle.stop_id" = '70106'
+            -- ignore positions from previous service date
+            AND HOUR(TO_HUMAN_TIME (vp.feed_timestamp)) >= 4
         GROUP BY
-            pt.trip_id,
+            trip_id,
+            vehicle_id,
+            departure,
             service_date,
-            tu_trip_id,
-            scheduled_time,
-            date,
-            departure
-        HAVING
-            first_vehicle_position >= first_prediction - INTERVAL 20 MINUTES
-            AND departure <= first_prediction + INTERVAL 20 MINUTES
-        ORDER BY
-            date
+            correct_consist;
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo, vehicles_for_unpredicted_trips):
+    _df = mo.sql(
+        f"""
+        -- now read in the consist data from Glides. For the trips that did get assigned, when was a consist first entered for that trip?
+        SELECT
+            trip_id,
+            service_date,
+            tug."data.tripUpdates.cars" glides_consist,
+            departure,
+            MIN(time) first_consist_entered,
+            first_consist_entered < departure had_consist_entry
+        FROM
+            vehicles_for_unpredicted_trips vut
+            LEFT JOIN lamp.main.trip_updates tug ON tug."data.tripUpdates.tripKey.tripId" = trip_id
+            AND DATE(strptime(tug."data.tripUpdates.tripKey.serviceDate", '%Y-%m-%d')) = DATE(service_date)
+        WHERE
+            glides_consist IS NOT NULL
+        GROUP BY trip_id, service_date, glides_consist, departure
+        ORDER BY service_date
         """
     )
     return
