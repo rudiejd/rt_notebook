@@ -271,7 +271,7 @@ def _(mo, pullout_trips_with_date, trip_updates, vehicle_first_departure):
 def _(mo, pullout_trips_with_date):
     _df = mo.sql(
         f"""
-        -- trips that didn't get a prediction before departure from boston college. What's the vehicle and consist they eventually got when that trip did get predictions?
+        -- What's the vehicle and consist a trip eventually got when that trip did get predictions?
         CREATE TABLE vehicles_for_unpredicted_trips AS SELECT
             trip_id,
             departure,
@@ -306,7 +306,7 @@ def _(mo, vehicles_for_unpredicted_trips):
     _df = mo.sql(
         f"""
         -- for the vehicles that ended up making the pullout trip, WHEN did they first exist (regardless of what trip they were assigned to)
-        SELECT
+        CREATE TABLE vehicle_creation_data AS SELECT
             trip_id,
             vehicle_id,
             service_date,
@@ -345,28 +345,135 @@ def _(mo, vehicles_for_unpredicted_trips):
 
 
 @app.cell
-def _(mo, vehicles_for_unpredicted_trips):
+def _(mo, vehicle_creation_data, vehicles_for_unpredicted_trips):
     _df = mo.sql(
         f"""
         -- now read in the consist data from Glides. For the trips that did get assigned, when was a consist first entered for that trip?
         SELECT
-            trip_id,
-            service_date,
-            tug."data.tripUpdates.cars" glides_consist,
-            departure,
-            MIN(time) first_consist_entered,
-            first_consist_entered < departure had_consist_entry
+            vut.trip_id,
+            vut.service_date,
+            first_consist,
+            correct_consist,
+            vut.departure,
+            creation_time,
+            MIN(time) - INTERVAL 5 HOURS first_consist_entered,
+            COALESCE(vehicle_existed_5min, FALSE) AS vehicle_existed_5min_before_departure,
+            first_consist_entered < vut.departure had_consist_entry_before,
+            first_consist_entered + INTERVAL 5 MINUTES < vut.departure had_consist_entry_5min_before
         FROM
             vehicles_for_unpredicted_trips vut
-            LEFT JOIN lamp.main.trip_updates tug ON tug."data.tripUpdates.tripKey.tripId" = trip_id
-            AND DATE(strptime(tug."data.tripUpdates.tripKey.serviceDate", '%Y-%m-%d')) = DATE(service_date)
+            LEFT JOIN vehicle_creation_data vcd ON vut.trip_id = vcd.trip_id
+            AND vut.service_date = vcd.service_date
+            LEFT JOIN lamp.main.trip_updates tug ON tug."data.tripUpdates.tripKey.tripId" = vut.trip_id
+            AND DATE(
+                strptime(
+                    tug."data.tripUpdates.tripKey.serviceDate",
+                    '%Y-%m-%d'
+                )
+            ) = DATE(vut.service_date)
         WHERE
-            glides_consist IS NOT NULL
-        GROUP BY trip_id, service_date, glides_consist, departure
-        ORDER BY service_date
+            tug."data.tripUpdates.cars" IS NOT NULL
+        GROUP BY
+            vut.trip_id,
+            vut.service_date,
+            vut.departure,
+            first_consist,
+            correct_consist,
+            creation_time,
+            vehicle_existed_5min,
+        ORDER BY
+            vut.service_date
         """
     )
     return
+
+
+@app.cell
+def _(first_prediction_by_day, mo):
+    _df = mo.sql(
+        f"""
+        -- for only the departures that did get predictions, when was their consist entered into glides?
+        WITH deps AS (SELECT
+            trip_id,
+            service_date,
+            MIN(time) - INTERVAL 5 HOURS first_consist_entered,
+            fp.first_prediction
+        FROM
+            first_prediction_by_day fp
+            LEFT JOIN lamp.main.trip_updates tug ON tug."data.tripUpdates.tripKey.tripId" = trip_id
+            AND DATE(strptime(tug."data.tripUpdates.tripKey.serviceDate", '%Y-%m-%d')) = DATE(service_date) 
+        WHERE
+            glides_consist IS NOT NULL
+        GROUP BY trip_id, service_date, first_prediction,
+        ORDER BY service_date)
+        SELECT AVG(first_prediction - first_consist_entered)
+        FROM deps
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    _df = mo.sql(
+        f"""
+        CREATE TABLE gtfs_trips AS SELECT * FROM read_csv('~/git/gtfs_creator/output/developer/trips.txt', sample_size=-1)
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    _df = mo.sql(
+        f"""
+        CREATE OR REPLACE TABLE gtfs_trip_last_stop AS SELECT MAX_BY(stop_id, stop_sequence) expected_last_stop, trip_id 
+        FROM read_csv('~/git/gtfs_creator/output/developer/stop_times.txt', sample_size=-1)
+        GROUP BY trip_id
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    _df = mo.sql(
+        f"""
+        CREATE OR REPLACE TABLE stops AS SELECT *
+        FROM read_csv('~/git/gtfs_creator/output/developer/stops.txt', sample_size=-1);
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    _df = mo.sql(
+        f"""
+        SELECT "trip_update.trip.route_id" route_id, "trip_update.stop_time_update.schedule_relationship" schedule_relationship, MAX("trip_update.trip.start_time"), COUNT(*), FROM lamp.read_ymd (
+                'RT_TRIP_UPDATES',
+                DATE('2026-03-17'),
+                DATE('2026-03-18')
+            )
+        WHERE "trip_update.vehicle.id" IS NULL AND schedule_relationship IS NULL
+        GROUP BY route_id, schedule_relationship
+        ORDER BY route_id, COUNT(*) DESC
+        """
+    )
+    return
+
+
+app._unparsable_cell(
+    r"""
+    _df = mo.sql(
+        f\"\"\"
+        SELECT DISTINCT \"trip_update.route_id\" FROM {df
+        \"\"\",
+        output=False
+    )
+    """,
+    name="_"
+)
 
 
 if __name__ == "__main__":
